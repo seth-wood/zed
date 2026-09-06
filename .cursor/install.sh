@@ -18,6 +18,12 @@ printf 'Dpkg::Options { "--force-confdef"; "--force-confold"; };\n' \
 
 script/linux
 
+# Cloud Agent VMs are headless and have no real GPU, but Zed's GPUI renderer
+# requires a Vulkan driver (ICD) to open a window. Install Mesa's software
+# rasterizer (lavapipe) so the GUI can run for manual testing. Run Zed with
+# `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json ZED_ALLOW_EMULATED_GPU=1`.
+sudo apt-get install -y mesa-vulkan-drivers
+
 # Warm the dependency cache. Uses the committed Cargo.lock so no versions are
 # changed during setup.
 cargo fetch --locked
