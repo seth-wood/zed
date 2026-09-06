@@ -5,6 +5,7 @@ alwaysApply: true
 # pstack model configuration. One line per role. Delete a line to fall back to the skill default.
 # `inherit-parent` or `auto` as a value: the role runs on the parent chat model (omit Task `model`). Alias entries in a panel list still count toward its fan-out.
 # Split: coordinator/judgment is Grok 4.6; workhorse implementation inherits the parent (`auto`).
+# Never use *-fast slugs (not cursor-grok-4.6-xhigh-fast, not any other -fast variant).
 # pstack skills read `~/.cursor/rules/pstack-models.mdc`. If that path is missing, copy this file there before launching pstack skills.
 feature, refactoring: auto
 bug-fix: auto
