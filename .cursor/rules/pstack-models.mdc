@@ -1,0 +1,27 @@
+---
+description: pstack per-role model choices (overrides skill defaults)
+alwaysApply: true
+---
+# pstack model configuration. One line per role. Delete a line to fall back to the skill default.
+# `inherit-parent` or `auto` as a value: the role runs on the parent chat model (omit Task `model`). Alias entries in a panel list still count toward its fan-out.
+# Split: coordinator/judgment is Grok 4.6; workhorse implementation inherits the parent (`auto`).
+# Never use *-fast slugs (not cursor-grok-4.6-xhigh-fast, not any other -fast variant).
+# pstack skills read `~/.cursor/rules/pstack-models.mdc`. If that path is missing, copy this file there before launching pstack skills.
+feature, refactoring: auto
+bug-fix: auto
+perf-issue: auto
+hillclimb: auto
+judgment and prose: cursor-grok-4.6-xhigh
+hardest tasks: cursor-grok-4.6-xhigh
+how explorer: auto
+how explainer: cursor-grok-4.6-xhigh
+how critics: cursor-grok-4.6-xhigh
+why investigators: auto
+why synthesizer: cursor-grok-4.6-xhigh
+reflect tooling: auto
+reflect judgment, divergent, synthesizer: cursor-grok-4.6-xhigh
+arena runners: auto
+arena cross-judge pool: cursor-grok-4.6-xhigh
+swarm workers: auto
+architect runners: auto
+interrogate reviewers: cursor-grok-4.6-xhigh
