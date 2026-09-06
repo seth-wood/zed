@@ -1,0 +1,42 @@
+---
+description: Keep fork-only .cursor skills/rules out of upstream Zed PRs
+alwaysApply: true
+---
+
+# Fork `.cursor/` vs upstream PRs
+
+This fork (`seth-wood/zed`) **intentionally commits** `.cursor/skills/` and `.cursor/rules/` so Cloud agents get `verify-zed` and related guidance. Upstream (`zed-industries/zed`) must not receive those files.
+
+## Do
+
+- Treat `.cursor/skills/` and `.cursor/rules/` as **fork-only** infrastructure. Update them on this fork freely.
+- Prefer committing skill/rule changes on a fork maintenance branch or `main`, not mixed into an upstream feature PR.
+- For any change meant for **upstream**, create the branch from upstream `main`:
+
+  ```bash
+  git remote add upstream https://github.com/zed-industries/zed.git 2>/dev/null || true
+  git fetch upstream
+  git checkout -b <feature-branch> upstream/main
+  ```
+
+- Before opening or updating a PR targeting `zed-industries/zed`, run:
+
+  ```bash
+  git fetch upstream
+  git diff --name-only upstream/main...HEAD | grep -E '^\.cursor/' && exit 1 || true
+  ```
+
+  If that prints paths, **stop**: rebase/cherry-pick so `.cursor/` commits are not in the PR range.
+
+## Do not
+
+- Do not open an upstream PR from a branch whose history includes `.cursor/` commits.
+- Do not remove `.cursor/` from this fork “to clean a PR”; leave fork skills in place and branch from `upstream/main` instead.
+- Do not assume `.gitignore` or `export-ignore` will hide committed `.cursor/` files from a GitHub PR — they will not.
+
+## Quick mental model
+
+| Destination | `.cursor/skills` + `.cursor/rules` |
+| --- | --- |
+| This fork (`seth-wood/zed`) | Allowed / expected |
+| Upstream PR (`zed-industries/zed`) | Forbidden in the PR diff |

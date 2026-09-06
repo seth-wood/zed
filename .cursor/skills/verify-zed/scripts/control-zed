@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+# control-zed — launch, doctor, drive, and tear down an isolated Zed GUI instance
+# for verification. Agents invoke this; humans should not need to.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_ARTIFACTS="${SKILL_DIR}/artifacts"
+FIXTURE_PROJECT="${SKILL_DIR}/fixtures/sample-project"
+
+STATE_DIR="${ZED_VERIFY_STATE_DIR:-/tmp/zed-verify-state}"
+mkdir -p "${STATE_DIR}"
+
+die() { echo "control-zed: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
+
+resolve_bin() {
+  if [[ -n "${ZED_BIN:-}" ]]; then
+    echo "${ZED_BIN}"
+    return
+  fi
+  local candidates=(
+    "${ROOT}/target/debug/zed"
+    "${ROOT}/target/release/zed"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -x "$c" ]]; then
+      echo "$c"
+      return
+    fi
+  done
+  die "no zed binary found. Build with: cargo build -p zed (from ${ROOT}), or set ZED_BIN"
+}
+
+load_instance() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "instance id required"
+  local f="${STATE_DIR}/${id}.env"
+  [[ -f "$f" ]] || die "unknown instance '${id}' (no ${f})"
+  # shellcheck disable=SC1090
+  source "$f"
+}
+
+save_instance() {
+  local id="$1"
+  cat > "${STATE_DIR}/${id}.env" <<EOF
+ZED_VERIFY_ID=${id}
+ZED_VERIFY_PID=${ZED_VERIFY_PID}
+ZED_VERIFY_DATA_DIR=${ZED_VERIFY_DATA_DIR}
+ZED_VERIFY_LOG=${ZED_VERIFY_LOG}
+ZED_VERIFY_BIN=${ZED_VERIFY_BIN}
+ZED_VERIFY_DISPLAY=${ZED_VERIFY_DISPLAY}
+ZED_VERIFY_PROJECT=${ZED_VERIFY_PROJECT}
+ZED_VERIFY_STARTED_AT=${ZED_VERIFY_STARTED_AT}
+EOF
+}
+
+find_zed_wid() {
+  local pid="$1"
+  local wid=""
+  # Dev builds use WM_CLASS / app_id "dev.zed.Zed-Dev"; stable uses "dev.zed.Zed".
+  for class in "dev.zed.Zed-Dev" "dev.zed.Zed" "dev.zed.Zed-Preview" "dev.zed.Zed-Nightly" "Zed"; do
+    wid="$(xdotool search --pid "$pid" --onlyvisible --class "${class}" 2>/dev/null | head -n1 || true)"
+    if [[ -n "$wid" ]]; then
+      echo "$wid"
+      return 0
+    fi
+  done
+  # Fallback: any visible window owned by the process.
+  wid="$(xdotool search --pid "$pid" --onlyvisible 2>/dev/null | head -n1 || true)"
+  if [[ -n "$wid" ]]; then
+    echo "$wid"
+    return 0
+  fi
+  return 1
+}
+
+wait_for_window() {
+  local pid="$1"
+  local timeout="${2:-90}"
+  local deadline=$((SECONDS + timeout))
+  local wid=""
+  while (( SECONDS < deadline )); do
+    if wid="$(find_zed_wid "$pid")"; then
+      echo "$wid"
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      die "zed process ${pid} exited before a window appeared (see ${ZED_VERIFY_LOG:-log})"
+    fi
+    sleep 0.5
+  done
+  die "timed out waiting for Zed window from pid ${pid} after ${timeout}s"
+}
+
+cmd_launch() {
+  need xdotool
+  local display="${DISPLAY:-:1}"
+  local project="${FIXTURE_PROJECT}"
+  local timeout=120
+  local id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --id) id="$2"; shift 2 ;;
+      --project) project="$2"; shift 2 ;;
+      --display) display="$2"; shift 2 ;;
+      --timeout) timeout="$2"; shift 2 ;;
+      *) die "launch: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$id" ]] || id="run-$(date +%Y%m%d-%H%M%S)-$$"
+  [[ -d "$project" ]] || die "project path does not exist: ${project}"
+
+  if [[ -f "${STATE_DIR}/${id}.env" ]]; then
+    die "instance id '${id}' already exists; clean it up or pick another --id"
+  fi
+
+  local bin
+  bin="$(resolve_bin)"
+  local data_dir="/tmp/zed-verify-${id}"
+  local log="${data_dir}/zed.stdout.log"
+  mkdir -p "${data_dir}"
+
+  # Refuse to drive a shared default profile.
+  if [[ "${data_dir}" == "${HOME}/.local/share/zed"* ]] || [[ "${data_dir}" == "${HOME}/.config/zed"* ]]; then
+    die "refusing to use a non-isolated data dir: ${data_dir}"
+  fi
+
+  export DISPLAY="${display}"
+  # Emulated GPUs (llvmpipe in Cloud VMs) otherwise block on an Unsupported GPU modal.
+  export ZED_ALLOW_EMULATED_GPU=1
+  # Enable AccessKit so AT-SPI tools can inspect when needed.
+  export ZED_EXPERIMENTAL_A11Y=1
+  # Prefer X11 over Wayland in this VNC environment.
+  export WAYLAND_DISPLAY=""
+
+  echo "control-zed: launching ${bin}"
+  echo "control-zed: data-dir ${data_dir}"
+  echo "control-zed: project ${project}"
+  echo "control-zed: display ${display}"
+
+  # --user-data-dir isolates config/db/logs from the developer's real profile.
+  "${bin}" --user-data-dir "${data_dir}" "${project}" \
+    >"${log}" 2>&1 &
+  local pid=$!
+
+  ZED_VERIFY_ID="${id}"
+  ZED_VERIFY_PID="${pid}"
+  ZED_VERIFY_DATA_DIR="${data_dir}"
+  ZED_VERIFY_LOG="${log}"
+  ZED_VERIFY_BIN="${bin}"
+  ZED_VERIFY_DISPLAY="${display}"
+  ZED_VERIFY_PROJECT="${project}"
+  ZED_VERIFY_STARTED_AT="$(date -Iseconds)"
+  save_instance "${id}"
+
+  local wid
+  wid="$(wait_for_window "${pid}" "${timeout}")"
+  xdotool windowactivate --sync "${wid}" >/dev/null
+  # First-run "Unrecognized Project" trust modal defaults Trust and Continue to Enter.
+  # With ZED_ALLOW_EMULATED_GPU=1 the Unsupported GPU modal should not appear.
+  sleep 1
+  xdotool key --clearmodifiers Return
+  sleep 0.8
+  # Escape any residual overlay without otherwise changing workspace state.
+  xdotool key --clearmodifiers Escape
+  sleep 0.5
+
+  cat <<EOF
+ZED_VERIFY_ID=${id}
+ZED_VERIFY_PID=${pid}
+ZED_VERIFY_WID=${wid}
+ZED_VERIFY_DATA_DIR=${data_dir}
+ZED_VERIFY_LOG=${log}
+ZED_VERIFY_BIN=${bin}
+ZED_VERIFY_DISPLAY=${display}
+ZED_VERIFY_PROJECT=${project}
+EOF
+}
+
+cmd_doctor() {
+  need xdotool
+  local id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --id) id="$2"; shift 2 ;;
+      *) die "doctor: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "doctor requires --id"
+  load_instance "${id}"
+
+  local ok=1
+  echo "doctor: instance ${id}"
+
+  if kill -0 "${ZED_VERIFY_PID}" 2>/dev/null; then
+    echo "  process: up (pid ${ZED_VERIFY_PID})"
+  else
+    echo "  process: DOWN (pid ${ZED_VERIFY_PID})"
+    ok=0
+  fi
+
+  local resolved
+  resolved="$(resolve_bin)"
+  if [[ "${resolved}" == "${ZED_VERIFY_BIN}" ]]; then
+    echo "  binary: ${ZED_VERIFY_BIN}"
+  else
+    echo "  binary: MISMATCH started=${ZED_VERIFY_BIN} now=${resolved}"
+    ok=0
+  fi
+
+  if [[ -d "${ZED_VERIFY_DATA_DIR}" ]]; then
+    echo "  data-dir: ${ZED_VERIFY_DATA_DIR}"
+  else
+    echo "  data-dir: MISSING ${ZED_VERIFY_DATA_DIR}"
+    ok=0
+  fi
+
+  if [[ "${ZED_VERIFY_DATA_DIR}" != /tmp/zed-verify-* ]]; then
+    echo "  isolation: FAIL data-dir not under /tmp/zed-verify-*"
+    ok=0
+  else
+    echo "  isolation: ok (disposable data dir)"
+  fi
+
+  local wid=""
+  if wid="$(find_zed_wid "${ZED_VERIFY_PID}")"; then
+    local title
+    title="$(xdotool getwindowname "${wid}" 2>/dev/null || echo '?')"
+    echo "  window: wid=${wid} title=${title}"
+  else
+    echo "  window: NOT FOUND for pid ${ZED_VERIFY_PID}"
+    ok=0
+  fi
+
+  if [[ -n "${DISPLAY:-}" ]]; then
+    echo "  display: ${DISPLAY} (state expected ${ZED_VERIFY_DISPLAY})"
+  else
+    echo "  display: unset"
+    ok=0
+  fi
+
+  if [[ $ok -eq 1 ]]; then
+    echo "doctor: PASS"
+    return 0
+  fi
+  echo "doctor: FAIL — do not drive this instance"
+  return 1
+}
+
+active_wid() {
+  local wid
+  wid="$(find_zed_wid "${ZED_VERIFY_PID}")" || die "no visible Zed window for pid ${ZED_VERIFY_PID}"
+  echo "$wid"
+}
+
+focus_zed() {
+  local wid
+  wid="$(active_wid)"
+  xdotool windowactivate --sync "${wid}"
+  sleep 0.15
+}
+
+cmd_key() {
+  need xdotool
+  local id=""
+  local keys=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --id) id="$2"; shift 2 ;;
+      --) shift; keys+=("$@"); break ;;
+      *) keys+=("$1"); shift ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "key requires --id"
+  (( ${#keys[@]} > 0 )) || die "key requires key sequence (e.g. ctrl+shift+p)"
+  load_instance "${id}"
+  export DISPLAY="${ZED_VERIFY_DISPLAY}"
+  focus_zed
+  # xdotool wants key names joined; allow multiple args as one chord sequence.
+  xdotool key --clearmodifiers "${keys[@]}"
+}
+
+cmd_type() {
+  need xdotool
+  local id=""
+  local delay=30
+  local text=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --id) id="$2"; shift 2 ;;
+      --delay) delay="$2"; shift 2 ;;
+      --text) text="$2"; shift 2 ;;
+      *) text="$1"; shift ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "type requires --id"
+  [[ -n "$text" ]] || die "type requires text"
+  load_instance "${id}"
+  export DISPLAY="${ZED_VERIFY_DISPLAY}"
+  focus_zed
+  xdotool type --clearmodifiers --delay "${delay}" -- "${text}"
+}
+
+cmd_title() {
+  need xdotool
+  local id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --id) id="$2"; shift 2 ;;
+      *) die "title: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "title requires --id"
+  load_instance "${id}"
+  export DISPLAY="${ZED_VERIFY_DISPLAY}"
+  local wid
+  wid="$(active_wid)"
+  xdotool getwindowname "${wid}"
+}
+
+cmd_screenshot() {
+  need import
+  local id=""
+  local out=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --id) id="$2"; shift 2 ;;
+      --out) out="$2"; shift 2 ;;
+      *) die "screenshot: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "screenshot requires --id"
+  [[ -n "$out" ]] || die "screenshot requires --out PATH"
+  load_instance "${id}"
+  export DISPLAY="${ZED_VERIFY_DISPLAY}"
+  mkdir -p "$(dirname "${out}")"
+  focus_zed
+  local wid
+  wid="$(active_wid)"
+  # import from ImageMagick; capture the Zed window only.
+  import -window "${wid}" "${out}"
+  echo "screenshot: ${out}"
+}
+
+cmd_wait_title() {
+  need xdotool
+  local id=""
+  local pattern=""
+  local timeout=30
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --id) id="$2"; shift 2 ;;
+      --pattern) pattern="$2"; shift 2 ;;
+      --timeout) timeout="$2"; shift 2 ;;
+      *) die "wait-title: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "wait-title requires --id"
+  [[ -n "$pattern" ]] || die "wait-title requires --pattern"
+  load_instance "${id}"
+  export DISPLAY="${ZED_VERIFY_DISPLAY}"
+  local deadline=$((SECONDS + timeout))
+  local title=""
+  while (( SECONDS < deadline )); do
+    title="$(xdotool getwindowname "$(active_wid)" 2>/dev/null || true)"
+    if [[ "${title}" == *"${pattern}"* ]]; then
+      echo "wait-title: matched '${title}'"
+      return 0
+    fi
+    sleep 0.25
+  done
+  die "wait-title: timed out after ${timeout}s; last title='${title}' pattern='${pattern}'"
+}
+
+cmd_cleanup() {
+  local id=""
+  local keep_data=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --id) id="$2"; shift 2 ;;
+      --keep-data) keep_data=1; shift ;;
+      *) die "cleanup: unknown arg $1" ;;
+    esac
+  done
+  [[ -n "$id" ]] || die "cleanup requires --id"
+  local f="${STATE_DIR}/${id}.env"
+  if [[ ! -f "$f" ]]; then
+    echo "cleanup: nothing to do for ${id}"
+    return 0
+  fi
+  load_instance "${id}"
+
+  if kill -0 "${ZED_VERIFY_PID}" 2>/dev/null; then
+    echo "cleanup: sending SIGTERM to ${ZED_VERIFY_PID}"
+    kill "${ZED_VERIFY_PID}" 2>/dev/null || true
+    local deadline=$((SECONDS + 15))
+    while kill -0 "${ZED_VERIFY_PID}" 2>/dev/null && (( SECONDS < deadline )); do
+      sleep 0.2
+    done
+    if kill -0 "${ZED_VERIFY_PID}" 2>/dev/null; then
+      echo "cleanup: SIGKILL ${ZED_VERIFY_PID}"
+      kill -9 "${ZED_VERIFY_PID}" 2>/dev/null || true
+    fi
+  else
+    echo "cleanup: process already gone"
+  fi
+
+  if [[ ${keep_data} -eq 0 && -d "${ZED_VERIFY_DATA_DIR}" ]]; then
+    # Never delete evidence dirs; only the disposable profile under /tmp/zed-verify-*.
+    if [[ "${ZED_VERIFY_DATA_DIR}" == /tmp/zed-verify-* ]]; then
+      rm -rf "${ZED_VERIFY_DATA_DIR}"
+      echo "cleanup: removed ${ZED_VERIFY_DATA_DIR}"
+    else
+      echo "cleanup: refusing to remove unexpected data dir ${ZED_VERIFY_DATA_DIR}"
+    fi
+  fi
+
+  rm -f "${f}"
+  echo "cleanup: removed instance state ${id}"
+  echo "cleanup: evidence under ${DEFAULT_ARTIFACTS}/ is retained"
+}
+
+cmd_help() {
+  cat <<'EOF'
+control-zed — isolated Zed GUI verification harness
+
+Usage:
+  control-zed launch [--id ID] [--project PATH] [--display :N] [--timeout SECS]
+  control-zed doctor --id ID
+  control-zed key --id ID KEY [KEY...]
+  control-zed type --id ID --text TEXT
+  control-zed title --id ID
+  control-zed wait-title --id ID --pattern SUBSTR [--timeout SECS]
+  control-zed screenshot --id ID --out PATH.png
+  control-zed cleanup --id ID [--keep-data]
+
+Env:
+  ZED_BIN                 Override path to the zed binary
+  ZED_VERIFY_STATE_DIR    Instance state dir (default /tmp/zed-verify-state)
+  DISPLAY                 X11 display (launch also accepts --display)
+
+Never pass the developer's real ~/.config/zed or ~/.local/share/zed as --user-data-dir.
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+  case "$cmd" in
+    launch) cmd_launch "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    key) cmd_key "$@" ;;
+    type) cmd_type "$@" ;;
+    title) cmd_title "$@" ;;
+    wait-title) cmd_wait_title "$@" ;;
+    screenshot) cmd_screenshot "$@" ;;
+    cleanup) cmd_cleanup "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *) die "unknown command '${cmd}' (try help)" ;;
+  esac
+}
+
+main "$@"

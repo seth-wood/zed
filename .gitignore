@@ -22,7 +22,16 @@
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .venv
 .vscode
-.cursor/
+# Cursor: commit skills/rules for this fork's agents; ignore other local Cursor state.
+.cursor/*
+!.cursor/skills/
+!.cursor/skills/**
+!.cursor/rules/
+!.cursor/rules/**
+# Verification proof screenshots stay local (skills keep their own artifacts/.gitignore too).
+.cursor/skills/**/artifacts/**
+!.cursor/skills/**/artifacts/
+!.cursor/skills/**/artifacts/.gitignore
 .wrangler
 .perf-runs
 /assets/*licenses.*
