@@ -28,6 +28,7 @@
 !.cursor/skills/**
 !.cursor/rules/
 !.cursor/rules/**
+!.cursor/install.sh
 # Verification proof screenshots stay local (skills keep their own artifacts/.gitignore too).
 .cursor/skills/**/artifacts/**
 !.cursor/skills/**/artifacts/
